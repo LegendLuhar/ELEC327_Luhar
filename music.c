@@ -13,15 +13,16 @@
  * arrays and wraps back to frame 0 after the last frame, creating
  * a seamless loop.
  *
- * The three animations are deliberately distinct:
+ * The four animations are deliberately distinct:
  *
- *   boot_animation : rotating LED chase + all-flash.  ~2 s cycle.
- *   win_animation  : diagonal pairs, ascending tones. ~3.6 s cycle.
- *   lose_animation : adjacent pairs, low tones.       ~3.2 s cycle.
+ *   boot_animation   : rotating LED chase + all-flash.       ~2 s cycle.
+ *   win_animation    : diagonal pairs, ascending tones.      ~3.5 s cycle.
+ *   lose_animation   : adjacent pairs, low tones.            ~2 s cycle.
+ *   record_animation : white/purple/cyan flash, high tones.  ~1.5 s cycle.
  * ============================================================ */
-#include "music.h"              /* TONE_* macros                     */
-#include "state_machine_logic.h" /* animation_note_t, SIXTEENTH_NOTE */
-#include "colors.h"             /* led_single[], leds_all_on, etc.   */
+#include "music.h"
+#include "state_machine_logic.h"
+#include "colors.h"
 
 /* ===========================================================
  * boot_animation
@@ -30,16 +31,14 @@
  * Duration: 8 frames × 2 × 125 ms = 2.0 s per cycle.
  * =========================================================== */
 const animation_note_t boot_animation[] = {
-    /* ---- Rotating chase: one LED + its tone ---- */
-    { .note = {TONE_BTN_0, true},  .leds = &led_single[0], .duration = 2 }, /* Blue   + G5 */
-    { .note = {TONE_BTN_1, true},  .leds = &led_single[1], .duration = 2 }, /* Red    + C6 */
-    { .note = {TONE_BTN_2, true},  .leds = &led_single[2], .duration = 2 }, /* Green  + E6 */
-    { .note = {TONE_BTN_3, true},  .leds = &led_single[3], .duration = 2 }, /* Yellow + G6 */
-    /* ---- All-flash pulse (twice) ---- */
-    { .note = {TONE_MID,   true},  .leds = &leds_all_on,   .duration = 2 }, /* All on + B5 */
-    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 }, /* Silence     */
-    { .note = {TONE_MID,   true},  .leds = &leds_all_on,   .duration = 2 }, /* All on + B5 */
-    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 }, /* Silence     */
+    { .note = {TONE_BTN_0, true},  .leds = &led_single[0], .duration = 2 },
+    { .note = {TONE_BTN_1, true},  .leds = &led_single[1], .duration = 2 },
+    { .note = {TONE_BTN_2, true},  .leds = &led_single[2], .duration = 2 },
+    { .note = {TONE_BTN_3, true},  .leds = &led_single[3], .duration = 2 },
+    { .note = {TONE_MID,   true},  .leds = &leds_all_on,   .duration = 2 },
+    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 },
+    { .note = {TONE_MID,   true},  .leds = &leds_all_on,   .duration = 2 },
+    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 },
 };
 const int boot_animation_length = sizeof(boot_animation) / sizeof(animation_note_t);
 
@@ -48,21 +47,15 @@ const int boot_animation_length = sizeof(boot_animation) / sizeof(animation_note
  * win_animation
  * Diagonal LED pairs (0+2 and 1+3) alternate with ascending
  * tones, culminating in an all-LED flash at the highest note.
- * Visually: an "X" pattern that twinkles.
- * Duration: (3+3+3+3+4+2) × 125 ms ≈ 3.5 s per cycle.
- *
- * Clearly different from lose_animation:
- *   - Uses DIAGONAL pairs vs adjacent
- *   - Uses ascending (high) tones vs descending (low) tones
- *   - Ends with an all-LED climax
+ * Duration: (3+3+3+3+4+2) × 125 ms ≈ 2.25 s per cycle.
  * =========================================================== */
 const animation_note_t win_animation[] = {
-    { .note = {TONE_BTN_2, true},  .leds = &leds_pair_02,  .duration = 3 }, /* Diag A + E6   */
-    { .note = {TONE_BTN_3, true},  .leds = &leds_pair_13,  .duration = 3 }, /* Diag B + G6   */
-    { .note = {TONE_BTN_2, true},  .leds = &leds_pair_02,  .duration = 3 }, /* Diag A + E6   */
-    { .note = {TONE_HIGH,  true},  .leds = &leds_pair_13,  .duration = 3 }, /* Diag B + C7   */
-    { .note = {TONE_HIGH,  true},  .leds = &leds_all_on,   .duration = 4 }, /* All on + C7   */
-    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 }, /* Silence       */
+    { .note = {TONE_BTN_2, true},  .leds = &leds_pair_02,  .duration = 3 },
+    { .note = {TONE_BTN_3, true},  .leds = &leds_pair_13,  .duration = 3 },
+    { .note = {TONE_BTN_2, true},  .leds = &leds_pair_02,  .duration = 3 },
+    { .note = {TONE_HIGH,  true},  .leds = &leds_pair_13,  .duration = 3 },
+    { .note = {TONE_HIGH,  true},  .leds = &leds_all_on,   .duration = 4 },
+    { .note = {0,          false}, .leds = &leds_off,       .duration = 2 },
 };
 const int win_animation_length = sizeof(win_animation) / sizeof(animation_note_t);
 
@@ -71,17 +64,29 @@ const int win_animation_length = sizeof(win_animation) / sizeof(animation_note_t
  * lose_animation
  * Adjacent LED pairs (0+1 and 2+3) alternate with low
  * descending tones — a somber "game over" feel.
- * Visually: a left/right "swing" pattern with dim colors.
  * Duration: (6+6+4) × 125 ms = 2.0 s per cycle.
- *
- * Clearly different from win_animation:
- *   - Uses ADJACENT pairs vs diagonal
- *   - Uses descending low tones (A3, E3) vs ascending high tones
- *   - No all-LED climax
  * =========================================================== */
 const animation_note_t lose_animation[] = {
-    { .note = {TONE_LOW_A, true},  .leds = &leds_pair_01,  .duration = 6 }, /* Left  + A3 */
-    { .note = {TONE_LOW_E, true},  .leds = &leds_pair_23,  .duration = 6 }, /* Right + E3 */
-    { .note = {0,          false}, .leds = &leds_off,       .duration = 4 }, /* Silence    */
+    { .note = {TONE_LOW_A, true},  .leds = &leds_pair_01,  .duration = 6 },
+    { .note = {TONE_LOW_E, true},  .leds = &leds_pair_23,  .duration = 6 },
+    { .note = {0,          false}, .leds = &leds_off,       .duration = 4 },
 };
 const int lose_animation_length = sizeof(lose_animation) / sizeof(animation_note_t);
+
+
+/* ===========================================================
+ * record_animation
+ * Rapid white → purple → cyan flash with ascending celebration
+ * tones (F6 → A6 → D7).  Plays once through before the FSM
+ * transitions to the normal win animation.
+ * Duration: (2+2+2+2+2+2) × 125 ms = 1.5 s per cycle.
+ * =========================================================== */
+const animation_note_t record_animation[] = {
+    { .note = {TONE_REC_1, true},  .leds = &leds_all_white,  .duration = 2 },
+    { .note = {TONE_REC_2, true},  .leds = &leds_all_purple, .duration = 2 },
+    { .note = {TONE_REC_3, true},  .leds = &leds_all_cyan,   .duration = 2 },
+    { .note = {TONE_REC_1, true},  .leds = &leds_all_purple, .duration = 2 },
+    { .note = {TONE_REC_2, true},  .leds = &leds_all_white,  .duration = 2 },
+    { .note = {TONE_REC_3, true},  .leds = &leds_all_cyan,   .duration = 2 },
+};
+const int record_animation_length = sizeof(record_animation) / sizeof(animation_note_t);
