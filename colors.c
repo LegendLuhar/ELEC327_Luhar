@@ -26,73 +26,71 @@
 #define LED_GREEN  { .blue=0x00, .brightness=5, ._header=7, .red=0x00, .green=0xF0 }
 #define LED_YELLOW { .blue=0x00, .brightness=5, ._header=7, .red=0xD0, .green=0xA0 }
 
+#define LED_WHITE  { .blue=0xB0, .brightness=5, ._header=7, .red=0xB0, .green=0xB0 }
+#define LED_PURPLE { .blue=0xD0, .brightness=5, ._header=7, .red=0xC0, .green=0x00 }
+#define LED_CYAN   { .blue=0xD0, .brightness=5, ._header=7, .red=0x00, .green=0xD0 }
+#define LED_ORANGE { .blue=0x00, .brightness=5, ._header=7, .red=0xF0, .green=0x60 }
+
 /* SPI start/end frames for APA102 */
 #define SPI_START  { 0x0000, 0x0000 }
 #define SPI_END    { 0xFFFF, 0xFFFF }
 
 /* ===========================================================
- * Global LED messages
+ * Basic patterns
  * =========================================================== */
 
-/* All LEDs off */
 const leds_message_t leds_off = {
     .start = SPI_START,
     .led   = { LED_OFF, LED_OFF, LED_OFF, LED_OFF },
     .end   = SPI_END,
 };
 
-/* All LEDs on in their button colors */
 const leds_message_t leds_all_on = {
     .start = SPI_START,
     .led   = { LED_BLUE, LED_RED, LED_GREEN, LED_YELLOW },
     .end   = SPI_END,
 };
 
-/* Legacy alias — same content as leds_all_on */
 const leds_message_t leds_on = {
     .start = SPI_START,
     .led   = { LED_BLUE, LED_RED, LED_GREEN, LED_YELLOW },
     .end   = SPI_END,
 };
 
-/* ----------------------------------------------------------
- * Single-button LED array  (indexed by button / sequence value 0–3)
- * Each entry lights exactly one LED in that button's color.
- * Used for:
- *   - Sequence playback (show which button)
- *   - Player input feedback (LED tracks the physical button)
- * ---------------------------------------------------------- */
+/* ===========================================================
+ * Single-button LED array (indexed 0–3)
+ * =========================================================== */
 const leds_message_t led_single[4] = {
-    /* [0] Only LED 0 on — Blue (SW1) */
-    { .start = SPI_START,
-      .led   = { LED_BLUE, LED_OFF, LED_OFF, LED_OFF },
-      .end   = SPI_END },
-
-    /* [1] Only LED 1 on — Red (SW2) */
-    { .start = SPI_START,
-      .led   = { LED_OFF, LED_RED, LED_OFF, LED_OFF },
-      .end   = SPI_END },
-
-    /* [2] Only LED 2 on — Green (SW3) */
-    { .start = SPI_START,
-      .led   = { LED_OFF, LED_OFF, LED_GREEN, LED_OFF },
-      .end   = SPI_END },
-
-    /* [3] Only LED 3 on — Yellow (SW4) */
-    { .start = SPI_START,
-      .led   = { LED_OFF, LED_OFF, LED_OFF, LED_YELLOW },
-      .end   = SPI_END },
+    { .start = SPI_START, .led = { LED_BLUE,  LED_OFF, LED_OFF, LED_OFF    }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_OFF,   LED_RED, LED_OFF, LED_OFF    }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_OFF,   LED_OFF, LED_GREEN, LED_OFF  }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_OFF,   LED_OFF, LED_OFF, LED_YELLOW }, .end = SPI_END },
 };
 
-/* ----------------------------------------------------------
- * Win animation frames: diagonal pairs
- * LEDs 0+2 (Blue+Green) and LEDs 1+3 (Red+Yellow)
- * These create an "X-pattern" when alternating, visually
- * distinct from the adjacent-pair lose animation.
- * ---------------------------------------------------------- */
+/* ===========================================================
+ * All six pair combinations
+ * =========================================================== */
+const leds_message_t leds_pair_01 = {
+    .start = SPI_START,
+    .led   = { LED_BLUE, LED_RED, LED_OFF, LED_OFF },
+    .end   = SPI_END,
+};
+
 const leds_message_t leds_pair_02 = {
     .start = SPI_START,
     .led   = { LED_BLUE, LED_OFF, LED_GREEN, LED_OFF },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_pair_03 = {
+    .start = SPI_START,
+    .led   = { LED_BLUE, LED_OFF, LED_OFF, LED_YELLOW },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_pair_12 = {
+    .start = SPI_START,
+    .led   = { LED_OFF, LED_RED, LED_GREEN, LED_OFF },
     .end   = SPI_END,
 };
 
@@ -102,19 +100,84 @@ const leds_message_t leds_pair_13 = {
     .end   = SPI_END,
 };
 
-/* ----------------------------------------------------------
- * Lose animation frames: adjacent pairs
- * LEDs 0+1 (Blue+Red) and LEDs 2+3 (Green+Yellow)
- * Adjacent pairs create a left/right "swing" pattern.
- * ---------------------------------------------------------- */
-const leds_message_t leds_pair_01 = {
-    .start = SPI_START,
-    .led   = { LED_BLUE, LED_RED, LED_OFF, LED_OFF },
-    .end   = SPI_END,
-};
-
 const leds_message_t leds_pair_23 = {
     .start = SPI_START,
     .led   = { LED_OFF, LED_OFF, LED_GREEN, LED_YELLOW },
     .end   = SPI_END,
+};
+
+/* ===========================================================
+ * All four triple combinations
+ * =========================================================== */
+const leds_message_t leds_triple_012 = {
+    .start = SPI_START,
+    .led   = { LED_BLUE, LED_RED, LED_GREEN, LED_OFF },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_triple_013 = {
+    .start = SPI_START,
+    .led   = { LED_BLUE, LED_RED, LED_OFF, LED_YELLOW },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_triple_023 = {
+    .start = SPI_START,
+    .led   = { LED_BLUE, LED_OFF, LED_GREEN, LED_YELLOW },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_triple_123 = {
+    .start = SPI_START,
+    .led   = { LED_OFF, LED_RED, LED_GREEN, LED_YELLOW },
+    .end   = SPI_END,
+};
+
+/* ===========================================================
+ * Special color patterns (all 4 LEDs, uniform color)
+ * =========================================================== */
+const leds_message_t leds_all_white = {
+    .start = SPI_START,
+    .led   = { LED_WHITE, LED_WHITE, LED_WHITE, LED_WHITE },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_all_purple = {
+    .start = SPI_START,
+    .led   = { LED_PURPLE, LED_PURPLE, LED_PURPLE, LED_PURPLE },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_all_cyan = {
+    .start = SPI_START,
+    .led   = { LED_CYAN, LED_CYAN, LED_CYAN, LED_CYAN },
+    .end   = SPI_END,
+};
+
+const leds_message_t leds_all_orange = {
+    .start = SPI_START,
+    .led   = { LED_ORANGE, LED_ORANGE, LED_ORANGE, LED_ORANGE },
+    .end   = SPI_END,
+};
+
+/* ===========================================================
+ * Difficulty indicator patterns (indexed by difficulty_t 0–3)
+ *   Easy=green, Normal=blue, Hard=orange, Expert=red
+ * =========================================================== */
+const leds_message_t leds_difficulty[4] = {
+    { .start = SPI_START, .led = { LED_GREEN,  LED_GREEN,  LED_GREEN,  LED_GREEN  }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_BLUE,   LED_BLUE,   LED_BLUE,   LED_BLUE   }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_ORANGE, LED_ORANGE, LED_ORANGE, LED_ORANGE }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_RED,    LED_RED,    LED_RED,    LED_RED    }, .end = SPI_END },
+};
+
+/* ===========================================================
+ * Round progress indicators (cumulative left-to-right fill)
+ * Used during MODE_INTER_SEQUENCE to show round completion.
+ * =========================================================== */
+const leds_message_t leds_progress[4] = {
+    { .start = SPI_START, .led = { LED_WHITE, LED_OFF,   LED_OFF,   LED_OFF   }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_WHITE, LED_WHITE, LED_OFF,   LED_OFF   }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_WHITE, LED_WHITE, LED_WHITE, LED_OFF   }, .end = SPI_END },
+    { .start = SPI_START, .led = { LED_WHITE, LED_WHITE, LED_WHITE, LED_WHITE }, .end = SPI_END },
 };
