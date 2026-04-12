@@ -1,26 +1,35 @@
 /* ============================================================
  * state_machine_logic.c
- * ELEC327 Simon Game — Full FSM implementation
+ * ELEC327 Simon Game — Full FSM implementation (Advanced)
  *
  * GetNextState() is the heart of the game.  It is called once
  * per TIMG0 tick (every 0.625 ms) by the main loop and returns
- * a completely new state_t — no global mutable game state exists
- * outside the struct.
+ * a completely new state_t.
  *
- * Button logic: SW1-SW4 are active-low (pull-up resistors).
- *   (gpio_input & mask) == 0  means the button IS pressed.
+ * Advanced features implemented here:
  *
- * Rubric coverage:
- *   - Power-on animation (changing lights + sounds): MODE_BOOT_ANIM
- *   - Animation → game on button press: transition at any_just_pressed
- *   - Meaningful pre-game pause: MODE_PRE_GAME
- *   - Random sequence (TRNG-seeded in simon.c): GenerateSequence()
- *   - Button LED/tone tracks press: active_button + led_single[]
- *   - Timeout → LOSE: timeout_counter >= TIMEOUT_TICKS
- *   - Wrong button → LOSE: checked immediately on just_pressed
- *   - Win animation ≠ lose animation: different LED patterns + tones
- *   - Pause between sequences: MODE_INTER_SEQUENCE
- *   - Difficulty via one constant: WIN_SEQUENCE_LENGTH
+ *   1. Difficulty selection — which button starts the game
+ *      determines timeout, playback speed, win length, and
+ *      whether combo presses appear.
+ *
+ *   2. Multi-button reset — pressing all 4 buttons at once
+ *      returns to boot animation from any mode.
+ *
+ *   3. Double-button combo elements — on Hard/Expert, later
+ *      rounds include elements requiring two simultaneous presses.
+ *      A short grace period allows the second button to be added.
+ *
+ *   4. Creative LED usage — difficulty color flash, round
+ *      progress indicator, special colors for new-record and
+ *      combo elements.
+ *
+ *   5. Fastest performance tracking — per-difficulty best times
+ *      stored in RAM.  Beating a record triggers a special
+ *      celebration animation before the win animation.
+ *
+ *   6. Music sequencer mode — hold SW1+SW4 during boot animation
+ *      to enter a free-play mode where each button plays its
+ *      tone/LED.  All 4 buttons exits.
  * ============================================================ */
 
 #include <ti/devices/msp/msp.h>
@@ -33,61 +42,118 @@
 #include "random.h"
 
 /* ---------------------------------------------------------------
- * Module-private data tables
+ * Difficulty configuration table
+ *
+ * Each row: { timeout, elem_on, elem_gap, win_length, combo_start }
+ *   combo_start = 0 means no combo elements ever.
+ *   combo_start = N means combos appear starting at round N.
  * --------------------------------------------------------------- */
-
-/* GPIO masks for each game button (indexed 0-3, matching LEDs and tones) */
-static const uint32_t button_mask[4] = { SW1, SW2, SW3, SW4 };
-
-/* Per-button buzzer periods.  Order matches led_single[] and sequence[]. */
-static const uint16_t button_tones[4] = {
-    TONE_BTN_0,   /* SW1 – Blue   – G5  (783.99 Hz) */
-    TONE_BTN_1,   /* SW2 – Red    – C6  (1046.50 Hz) */
-    TONE_BTN_2,   /* SW3 – Green  – E6  (1318.51 Hz) */
-    TONE_BTN_3,   /* SW4 – Yellow – G6  (1567.98 Hz) */
+const difficulty_config_t difficulty_table[4] = {
+    [DIFF_EASY]   = { 4800, 1040, 480,  4,  0 },
+    [DIFF_NORMAL] = { 2400,  640, 320,  5,  0 },
+    [DIFF_HARD]   = { 1600,  480, 240,  7,  5 },
+    [DIFF_EXPERT] = { 1200,  320, 160, 10,  4 },
 };
 
+/* ---------------------------------------------------------------
+ * Per-difficulty best times (0 = no record yet).
+ * Persists across games within a single power cycle.
+ * --------------------------------------------------------------- */
+static uint32_t best_time[4] = { 0, 0, 0, 0 };
+
+/* ---------------------------------------------------------------
+ * Button masks and tones (indexed 0–3 matching LEDs/sequence)
+ * --------------------------------------------------------------- */
+static const uint32_t button_mask[4] = { SW1, SW2, SW3, SW4 };
+
+static const uint16_t button_tones[4] = {
+    TONE_BTN_0, TONE_BTN_1, TONE_BTN_2, TONE_BTN_3,
+};
+
+/* ---------------------------------------------------------------
+ * Combo LED lookup table — maps a 4-bit bitmask to a const
+ * leds_message_t pointer.  Bit i set = button i active.
+ * --------------------------------------------------------------- */
+static const leds_message_t *combo_led_lookup[16] = {
+    &leds_off,           /* 0x00 */
+    &led_single[0],      /* 0x01 = btn0 */
+    &led_single[1],      /* 0x02 = btn1 */
+    &leds_pair_01,       /* 0x03 = btn0+1 */
+    &led_single[2],      /* 0x04 = btn2 */
+    &leds_pair_02,       /* 0x05 = btn0+2 */
+    &leds_pair_12,       /* 0x06 = btn1+2 */
+    &leds_triple_012,    /* 0x07 = btn0+1+2 */
+    &led_single[3],      /* 0x08 = btn3 */
+    &leds_pair_03,       /* 0x09 = btn0+3 */
+    &leds_pair_13,       /* 0x0A = btn1+3 */
+    &leds_triple_013,    /* 0x0B = btn0+1+3 */
+    &leds_pair_23,       /* 0x0C = btn2+3 */
+    &leds_triple_023,    /* 0x0D = btn0+2+3 */
+    &leds_triple_123,    /* 0x0E = btn1+2+3 */
+    &leds_all_on,        /* 0x0F = all */
+};
+
+/* ---------------------------------------------------------------
+ * Helper: get the buzzer tone for a sequence element bitmask.
+ * Single-button → that button's tone.
+ * Multi-button  → TONE_CHORD (distinct from any single tone).
+ * --------------------------------------------------------------- */
+static uint16_t GetElementTone(uint8_t elem_mask)
+{
+    int count = 0;
+    int first = -1;
+    for (int i = 0; i < 4; i++) {
+        if (elem_mask & (1 << i)) {
+            if (first < 0) first = i;
+            count++;
+        }
+    }
+    if (count <= 1 && first >= 0)
+        return button_tones[first];
+    return TONE_CHORD;
+}
+
+/* ---------------------------------------------------------------
+ * Helper: count set bits in a byte
+ * --------------------------------------------------------------- */
+static int PopCount4(uint8_t mask)
+{
+    int c = 0;
+    for (int i = 0; i < 4; i++)
+        if (mask & (1 << i)) c++;
+    return c;
+}
+
 /* ===============================================================
- * UpdateButton  (private)
- * Per-button debounce state machine.  Returns the new button_t.
- * Input is pulled high; button press drives it low → mask reads 0.
+ * UpdateButton — per-button debounce state machine
  * =============================================================== */
 static button_t UpdateButton(button_t btn, uint32_t gpio_input, uint32_t mask)
 {
     button_t next = btn;
 
     if ((gpio_input & mask) == 0) {
-        /* ---------- Button is being held down ---------- */
         switch (btn.state) {
             case BUTTON_IDLE:
-                /* First detection: start counting debounce ticks */
                 next.state = BUTTON_BOUNCING;
                 next.depressed_counter = 1;
                 break;
-
             case BUTTON_BOUNCING:
                 next.depressed_counter++;
                 if (next.depressed_counter > BUTTON_BOUNCE_LIMIT)
-                    next.state = BUTTON_PRESS; /* Confirmed press */
+                    next.state = BUTTON_PRESS;
                 break;
-
             case BUTTON_PRESS:
-                /* Remain in PRESS; counter stays frozen (no overflow) */
                 break;
         }
     } else {
-        /* ---------- Button is released ---------- */
         next.state = BUTTON_IDLE;
         next.depressed_counter = 0;
     }
-
     return next;
 }
 
 /* ===============================================================
- * InitAnimation  (public)
- * Resets a song_state_t to the first frame of an animation array.
- * Call this whenever entering a mode that uses AdvanceAnimation().
+ * InitAnimation — reset a song_state_t to the first frame
  * =============================================================== */
 void InitAnimation(song_state_t *anim, const animation_note_t *song, int length)
 {
@@ -98,48 +164,62 @@ void InitAnimation(song_state_t *anim, const animation_note_t *song, int length)
 }
 
 /* ===============================================================
- * AdvanceAnimation  (private)
- * Advances the animation by exactly one tick.
- *  - Reads the current frame from anim_state.
- *  - Writes frame's led/buzzer values into *s.
- *  - Increments note_counter; wraps to next frame when duration expires.
+ * AdvanceAnimation — step animation by one tick
  * =============================================================== */
 static void AdvanceAnimation(state_t *s)
 {
     song_state_t           *a     = &s->anim_state;
     const animation_note_t *frame = &a->song[a->index];
 
-    /* Apply this frame's outputs */
     s->leds   = frame->leds;
     s->buzzer = frame->note;
 
-    /* Advance time within the frame */
     a->note_counter++;
     uint32_t frame_ticks = (uint32_t)frame->duration * (uint32_t)SIXTEENTH_NOTE;
     if (a->note_counter >= frame_ticks) {
         a->note_counter = 0;
-        /* Wrap back to frame 0 after the last frame (looping animation) */
         a->index = (a->index + 1) % a->song_length;
     }
 }
 
 /* ===============================================================
- * GenerateSequence  (public)
- * Fills sequence[0..length-1] with random values in [0, 3].
- * rand() must already be seeded via srand() (done in simon.c
- * using TRNG) before the first call.
+ * GenerateSequence
+ *
+ * Fills sequence[0..length-1].  Elements before combo_start_round
+ * are single-button bitmasks (0x01/0x02/0x04/0x08).  From
+ * combo_start_round onward, roughly 1-in-3 elements become
+ * two-button combos.
+ *
+ * current_len: how many elements are already locked in from the
+ * previous round (preserves the earlier part of the sequence).
+ * Only generates elements from current_len onward.
  * =============================================================== */
-void GenerateSequence(uint8_t *sequence, int length)
+void GenerateSequence(uint8_t *sequence, int length, int combo_start_round, int current_len)
 {
-    for (int i = 0; i < length; i++) {
-        sequence[i] = (uint8_t)rand();   /* LFSR rand() returns [0, 3] */
+    for (int i = current_len; i < length; i++) {
+        uint8_t r1 = (uint8_t)rand();
+
+        if (combo_start_round > 0 && i >= combo_start_round) {
+            uint8_t r2 = (uint8_t)rand();
+            if (r2 == 0) {
+                /* ~25% chance of a double-button combo */
+                uint8_t r3 = (uint8_t)rand();
+                uint8_t btn_a = r1 & 0x03;
+                uint8_t btn_b = r3 & 0x03;
+                if (btn_b == btn_a)
+                    btn_b = (btn_a + 1) & 0x03;
+                sequence[i] = (1 << btn_a) | (1 << btn_b);
+            } else {
+                sequence[i] = (1 << (r1 & 0x03));
+            }
+        } else {
+            sequence[i] = (1 << (r1 & 0x03));
+        }
     }
 }
 
 /* ===============================================================
- * SetBuzzerState  (public)
- * Applies a buzzer_state_t to TIMA1 hardware.
- * Called by main() each tick BEFORE GetNextState().
+ * SetBuzzerState — apply buzzer_state_t to TIMA1 hardware
  * =============================================================== */
 void SetBuzzerState(buzzer_state_t buzzer)
 {
@@ -152,30 +232,27 @@ void SetBuzzerState(buzzer_state_t buzzer)
 }
 
 /* ===============================================================
- * GetNextState  (public)  ← the FSM core
- *
- * Parameters:
- *   current    – full state from the previous tick
- *   gpio_input – GPIOA->DIN31_0 already masked to button pins
- *
- * Returns the next complete state_t.  The caller (main loop) will
- * apply .buzzer and .leds to hardware before the next tick.
+ * GetNextState — the FSM core
  * =============================================================== */
 state_t GetNextState(state_t current, uint32_t gpio_input)
 {
-    state_t new = current;   /* Start with a copy; modify selectively below */
+    state_t new = current;
 
-    /* ===========================================================
-     * Step 1 – Advance tick counters
-     * =========================================================== */
+    /* ----- Advance tick counters ----- */
     new.mode_counter++;
-    new.timeout_counter++;   /* Reset within MODE_PLAYER_INPUT at releases */
+    new.timeout_counter++;
 
-    /* ===========================================================
-     * Step 2 – Debounce all four buttons; detect press/release edges
-     * =========================================================== */
+    /* Accumulate game time during active play modes */
+    if (current.game_mode == MODE_SHOW_SEQUENCE ||
+        current.game_mode == MODE_PLAYER_INPUT  ||
+        current.game_mode == MODE_INTER_SEQUENCE) {
+        new.game_ticks++;
+    }
+
+    /* ----- Debounce all four buttons ----- */
     bool just_pressed[4]  = {false, false, false, false};
     bool just_released[4] = {false, false, false, false};
+    bool is_held[4]       = {false, false, false, false};
 
     for (int i = 0; i < 4; i++) {
         button_state_t prev = current.buttons[i].state;
@@ -184,38 +261,132 @@ state_t GetNextState(state_t current, uint32_t gpio_input)
 
         just_pressed[i]  = (prev != BUTTON_PRESS && curr == BUTTON_PRESS);
         just_released[i] = (prev == BUTTON_PRESS && curr != BUTTON_PRESS);
+        is_held[i]       = (curr == BUTTON_PRESS);
     }
 
     bool any_just_pressed = just_pressed[0] || just_pressed[1] ||
                             just_pressed[2] || just_pressed[3];
 
-    /* ===========================================================
-     * Step 3 – Default outputs: everything off
-     * (Each mode below may override these.)
-     * =========================================================== */
+    /* Build current held-buttons bitmask */
+    uint8_t held_mask = 0;
+    for (int i = 0; i < 4; i++)
+        if (is_held[i]) held_mask |= (1 << i);
+
+    /* ============================================================
+     * GLOBAL RESET: all 4 buttons pressed simultaneously → reboot
+     * Works in every mode except boot animation itself.
+     * ============================================================ */
+    if (current.game_mode != MODE_BOOT_ANIM && held_mask == 0x0F) {
+        new.game_mode      = MODE_BOOT_ANIM;
+        new.mode_counter   = 0;
+        new.active_buttons = 0;
+        new.chord_timer    = 0;
+        new.leds           = &leds_off;
+        new.buzzer         = (buzzer_state_t){ .period = 0, .sound_on = false };
+        InitAnimation(&new.anim_state, boot_animation, boot_animation_length);
+        return new;
+    }
+
+    /* ----- Default outputs: off ----- */
     new.leds   = &leds_off;
     new.buzzer = (buzzer_state_t){ .period = 0, .sound_on = false };
 
-    /* ===========================================================
-     * Step 4 – Mode-specific FSM logic
-     * =========================================================== */
+    /* ----- Difficulty config shorthand ----- */
+    const difficulty_config_t *dc = &difficulty_table[current.difficulty];
+
+    /* ============================================================
+     * Mode-specific FSM logic
+     * ============================================================ */
     switch (current.game_mode) {
 
     /* -----------------------------------------------------------
      * MODE_BOOT_ANIM
      *
-     * Plays boot_animation[] on loop until any button is pressed.
+     * Plays boot_animation[] on loop.
      *
-     * Rubric: changing lights, changing sounds, transitions to
-     * gameplay (via PRE_GAME) when a button is pressed.
+     * Button input uses a 100 ms detection window (SEQ_DETECT_TICKS):
+     *   - Single button pressed and window expires → start game
+     *     with that button's difficulty level.
+     *   - Two buttons pressed within the window → enter sequencer.
+     *   - Button released before window expires → immediate start.
+     *
+     * active_buttons accumulates presses; chord_timer tracks the
+     * window duration.
      * ----------------------------------------------------------- */
     case MODE_BOOT_ANIM:
-        AdvanceAnimation(&new);   /* Sets new.leds and new.buzzer */
+        AdvanceAnimation(&new);
 
-        if (any_just_pressed) {
-            /* ---- Transition: silence outputs, enter pre-game pause ---- */
-            new.leds         = &leds_off;
-            new.buzzer       = (buzzer_state_t){ .sound_on = false };
+        /* Accumulate any new presses into the detection bitmask */
+        for (int i = 0; i < 4; i++) {
+            if (just_pressed[i])
+                new.active_buttons |= (1 << i);
+        }
+
+        if (new.active_buttons != 0 && current.active_buttons == 0) {
+            new.chord_timer = 0;
+        }
+
+        if (current.active_buttons != 0) {
+            new.chord_timer++;
+
+            /* Two+ unique buttons detected → sequencer mode */
+            if (PopCount4(new.active_buttons) >= 2) {
+                new.game_mode      = MODE_SEQUENCER;
+                new.mode_counter   = 0;
+                new.active_buttons = 0;
+                new.chord_timer    = 0;
+                new.leds           = &leds_off;
+                new.buzzer         = (buzzer_state_t){ .sound_on = false };
+                break;
+            }
+
+            /* Detection window expired with single button → start game */
+            if (new.chord_timer >= SEQ_DETECT_TICKS) {
+                for (int i = 0; i < 4; i++) {
+                    if (new.active_buttons & (1 << i)) {
+                        new.difficulty = (difficulty_t)i;
+                        break;
+                    }
+                }
+                new.active_buttons = 0;
+                new.chord_timer    = 0;
+                new.game_mode      = MODE_DIFFICULTY_FLASH;
+                new.mode_counter   = 0;
+                new.leds           = &leds_off;
+                new.buzzer         = (buzzer_state_t){ .sound_on = false };
+            }
+        }
+
+        /* Button released before window expires → immediate game start */
+        if (held_mask == 0 && current.active_buttons != 0 &&
+            PopCount4(current.active_buttons) == 1) {
+            for (int i = 0; i < 4; i++) {
+                if (current.active_buttons & (1 << i)) {
+                    new.difficulty = (difficulty_t)i;
+                    break;
+                }
+            }
+            new.active_buttons = 0;
+            new.chord_timer    = 0;
+            new.game_mode      = MODE_DIFFICULTY_FLASH;
+            new.mode_counter   = 0;
+            new.leds           = &leds_off;
+            new.buzzer         = (buzzer_state_t){ .sound_on = false };
+        }
+        break;
+
+    /* -----------------------------------------------------------
+     * MODE_DIFFICULTY_FLASH
+     *
+     * Briefly displays the selected difficulty's color on all LEDs
+     * so the player gets visual confirmation of their choice.
+     * ----------------------------------------------------------- */
+    case MODE_DIFFICULTY_FLASH:
+        new.leds = &leds_difficulty[current.difficulty];
+        new.buzzer.period   = button_tones[current.difficulty];
+        new.buzzer.sound_on = true;
+
+        if (new.mode_counter >= DIFF_FLASH_TICKS) {
             new.game_mode    = MODE_PRE_GAME;
             new.mode_counter = 0;
         }
@@ -224,25 +395,19 @@ state_t GetNextState(state_t current, uint32_t gpio_input)
     /* -----------------------------------------------------------
      * MODE_PRE_GAME
      *
-     * All outputs off for PRE_GAME_TICKS (600 ms).
-     * This creates a clear visual/audio break between the animation
-     * and the first sequence flash.
-     *
-     * Rubric: "meaningful transition between animation and first
-     * sequence" (Gameplay-Playability 1).
+     * Silent pause before the first sequence.  Generates the
+     * full random sequence for this game.
      * ----------------------------------------------------------- */
     case MODE_PRE_GAME:
-        /* Outputs already defaulted to off above */
-
         if (new.mode_counter >= PRE_GAME_TICKS) {
-            /* Generate the full sequence once for this game */
-            GenerateSequence(new.sequence, WIN_SEQUENCE_LENGTH);
+            GenerateSequence(new.sequence, dc->win_length,
+                             dc->combo_start_round, 0);
 
-            /* Begin round 1 */
             new.seq_len      = 1;
             new.show_idx     = 0;
-            new.elem_active  = true;   /* Show first element immediately */
+            new.elem_active  = true;
             new.mode_counter = 0;
+            new.game_ticks   = 0;
             new.game_mode    = MODE_SHOW_SEQUENCE;
         }
         break;
@@ -250,40 +415,36 @@ state_t GetNextState(state_t current, uint32_t gpio_input)
     /* -----------------------------------------------------------
      * MODE_SHOW_SEQUENCE
      *
-     * Plays sequence[0 .. seq_len-1] to the player, one element
-     * at a time.  Each element:
-     *   - LED on + tone for ELEM_ON_TICKS  (400 ms)
-     *   - all off for ELEM_GAP_TICKS       (200 ms)
-     * After the last element, transitions to MODE_PLAYER_INPUT.
+     * Plays sequence[0..seq_len-1] to the player.  Each element:
+     *   LED(s) on + tone for elem_on_ticks
+     *   all off for elem_gap_ticks
      *
-     * Rubric: sequence playback with LED/tone feedback.
+     * Element bitmask selects which LEDs and which tone via the
+     * combo lookup table.
      * ----------------------------------------------------------- */
     case MODE_SHOW_SEQUENCE:
         if (current.elem_active) {
-            /* ---- Element is ON: light and sound ---- */
-            int elem = current.sequence[current.show_idx];
-            new.leds            = &led_single[elem];
-            new.buzzer.period   = button_tones[elem];
+            uint8_t elem = current.sequence[current.show_idx];
+            new.leds            = combo_led_lookup[elem & 0x0F];
+            new.buzzer.period   = GetElementTone(elem);
             new.buzzer.sound_on = true;
 
-            if (new.mode_counter >= ELEM_ON_TICKS) {
-                /* Turn off, move to gap or transition away */
+            if (new.mode_counter >= dc->elem_on_ticks) {
                 new.elem_active  = false;
                 new.mode_counter = 0;
-                new.show_idx++;    /* Advance to next element */
+                new.show_idx++;
 
                 if (new.show_idx >= current.seq_len) {
-                    /* All elements shown → await player input */
                     new.game_mode       = MODE_PLAYER_INPUT;
                     new.input_idx       = 0;
-                    new.active_button   = -1;
+                    new.active_buttons  = 0;
+                    new.chord_locked    = false;
+                    new.chord_timer     = 0;
                     new.timeout_counter = 0;
                 }
             }
         } else {
-            /* ---- Gap between elements: all off ---- */
-            /* Outputs already defaulted to off */
-            if (new.mode_counter >= ELEM_GAP_TICKS) {
+            if (new.mode_counter >= dc->elem_gap_ticks) {
                 new.elem_active  = true;
                 new.mode_counter = 0;
             }
@@ -293,151 +454,248 @@ state_t GetNextState(state_t current, uint32_t gpio_input)
     /* -----------------------------------------------------------
      * MODE_PLAYER_INPUT
      *
-     * Player reproduces the sequence.
+     * Player reproduces the sequence.  Supports both single and
+     * multi-button elements.
      *
-     * Rules:
-     *  1. Button LED + tone are ON exactly while the button is held.
-     *  2. Wrong button press → immediate LOSE (on press event).
-     *  3. No press within TIMEOUT_TICKS of last release → LOSE.
-     *  4. Correct last button released:
-     *       seq_len == WIN_SEQUENCE_LENGTH → WIN
-     *       else                           → INTER_SEQUENCE
-     *
-     * Rubric: button feedback, timeout, misplay, win/lose transitions.
+     * For multi-button (combo) elements, a CHORD_GRACE_TICKS
+     * window after the first press allows the second button to
+     * be added before validation occurs.
      * ----------------------------------------------------------- */
-    case MODE_PLAYER_INPUT:
+    case MODE_PLAYER_INPUT: {
 
-        /* ---- Timeout check (only when no button is being held) ---- */
-        if (current.active_button == -1 &&
-            new.timeout_counter >= TIMEOUT_TICKS) {
-            /* Timed out waiting for next press → LOSE */
+        uint8_t expected = current.sequence[current.input_idx];
+        int expected_count = PopCount4(expected);
+
+        /* ---- Timeout (only when no button is held) ---- */
+        if (current.active_buttons == 0 &&
+            new.timeout_counter >= dc->timeout_ticks) {
             new.game_mode    = MODE_LOSE_ANIM;
             new.mode_counter = 0;
             InitAnimation(&new.anim_state, lose_animation, lose_animation_length);
             break;
         }
 
-        if (current.active_button >= 0) {
-            /* ---- A button is currently held down ---- */
-            int btn = current.active_button;
+        if (current.active_buttons != 0) {
+            /* ========== Buttons are being held ========== */
 
-            /* Continue LED + tone feedback while button is held */
-            new.leds            = &led_single[btn];
-            new.buzzer.period   = button_tones[btn];
+            /* Update active_buttons with any newly pressed buttons */
+            for (int i = 0; i < 4; i++) {
+                if (just_pressed[i])
+                    new.active_buttons |= (1 << i);
+            }
+
+            /* LED + tone feedback for whatever is currently held */
+            new.leds            = combo_led_lookup[new.active_buttons & 0x0F];
+            new.buzzer.period   = GetElementTone(new.active_buttons);
             new.buzzer.sound_on = true;
 
-            if (just_released[btn]) {
-                /* ---- Button was just released ---- */
-                new.active_button   = -1;
-                new.timeout_counter = 0;   /* Restart timeout from release */
+            /* Advance chord timer */
+            new.chord_timer++;
 
-                /* Did releasing this button complete the current sequence? */
-                /* (input_idx was already incremented when the button was pressed) */
-                if (current.input_idx >= current.seq_len) {
-                    if (current.seq_len >= WIN_SEQUENCE_LENGTH) {
+            /* Check if chord is fully locked in */
+            if (!current.chord_locked) {
+                if (expected_count <= 1) {
+                    /* Single-button element: lock immediately */
+                    new.chord_locked = true;
+                } else if (PopCount4(new.active_buttons) >= expected_count) {
+                    /* All required combo buttons are pressed */
+                    new.chord_locked = true;
+                } else if (new.chord_timer >= CHORD_GRACE_TICKS) {
+                    /* Grace period expired — validate with what we have */
+                    new.chord_locked = true;
+                }
+            }
+
+            /* Validate once locked: any wrong button → LOSE */
+            if (new.chord_locked && !current.chord_locked) {
+                if (new.active_buttons != expected) {
+                    new.game_mode    = MODE_LOSE_ANIM;
+                    new.mode_counter = 0;
+                    InitAnimation(&new.anim_state, lose_animation, lose_animation_length);
+                    break;
+                }
+            }
+
+            /* Check for releases */
+            bool any_still_held = false;
+            for (int i = 0; i < 4; i++) {
+                if (new.active_buttons & (1 << i)) {
+                    if (just_released[i])
+                        new.active_buttons &= ~(1 << i);
+                    if (new.active_buttons & (1 << i))
+                        any_still_held = true;
+                }
+            }
+
+            if (!any_still_held && current.chord_locked) {
+                /* All buttons released after a locked chord */
+                new.timeout_counter = 0;
+                new.input_idx       = current.input_idx + 1;
+                new.chord_locked    = false;
+                new.chord_timer     = 0;
+
+                if (new.input_idx >= current.seq_len) {
+                    if (current.seq_len >= dc->win_length) {
                         /* ======== PLAYER WINS ======== */
-                        new.game_mode    = MODE_WIN_ANIM;
-                        new.mode_counter = 0;
-                        InitAnimation(&new.anim_state, win_animation, win_animation_length);
+                        uint32_t bt = best_time[current.difficulty];
+                        if (bt == 0 || new.game_ticks < bt) {
+                            best_time[current.difficulty] = new.game_ticks;
+                            new.new_record   = true;
+                            new.game_mode    = MODE_NEW_RECORD_ANIM;
+                            new.mode_counter = 0;
+                            InitAnimation(&new.anim_state, record_animation, record_animation_length);
+                        } else {
+                            new.new_record   = false;
+                            new.game_mode    = MODE_WIN_ANIM;
+                            new.mode_counter = 0;
+                            InitAnimation(&new.anim_state, win_animation, win_animation_length);
+                        }
                     } else {
-                        /* ---- Correct sequence for this round; next round ---- */
                         new.game_mode    = MODE_INTER_SEQUENCE;
                         new.mode_counter = 0;
                     }
                 }
-                /* else: more buttons still expected in this sequence */
             }
         } else {
-            /* ---- No button held; waiting for the next press ---- */
+            /* ========== No button held — waiting for press ========== */
             for (int i = 0; i < 4; i++) {
                 if (!just_pressed[i]) continue;
 
-                /* A button was just pressed — check correctness */
-                if (i == (int)current.sequence[current.input_idx]) {
-                    /* ---- Correct button ---- */
-                    new.active_button = i;
-                    new.input_idx++;        /* Advance expected index */
-                    /* timeout_counter reset happens on RELEASE, not here */
-                } else {
-                    /* ---- Wrong button → immediate LOSE ---- */
-                    new.game_mode    = MODE_LOSE_ANIM;
-                    new.mode_counter = 0;
-                    InitAnimation(&new.anim_state, lose_animation, lose_animation_length);
+                /* First button of a new chord */
+                new.active_buttons = (1 << i);
+                new.chord_locked   = false;
+                new.chord_timer    = 0;
+
+                /* For single-button elements, validate immediately */
+                if (expected_count <= 1) {
+                    new.chord_locked = true;
+                    if ((1 << i) != expected) {
+                        new.game_mode    = MODE_LOSE_ANIM;
+                        new.mode_counter = 0;
+                        InitAnimation(&new.anim_state, lose_animation, lose_animation_length);
+                    }
                 }
-                break;   /* Handle only the first newly pressed button */
+                break;
             }
         }
         break;
+    }
 
     /* -----------------------------------------------------------
      * MODE_INTER_SEQUENCE
      *
-     * Silent pause between sequences.  Gives the player a clear
-     * indication that their last press was accepted and the next
-     * (longer) sequence is about to begin.
-     *
-     * Rubric: "meaningful transition between player's button presses
-     * and the next sequence" (Gameplay-Playability 2).
+     * Pause between rounds.  Shows a round progress indicator
+     * using white LEDs filling left-to-right based on how many
+     * rounds the player has completed.
      * ----------------------------------------------------------- */
-    case MODE_INTER_SEQUENCE:
-        /* Outputs already defaulted to off */
+    case MODE_INTER_SEQUENCE: {
+        /* Show round progress: how many rounds completed (clamped to 0-3) */
+        int progress_idx = current.seq_len - 1;
+        if (progress_idx < 0) progress_idx = 0;
+        if (progress_idx > 3) progress_idx = 3;
+
+        /* Pulse on/off: on for first 2/3, off for last 1/3 of the pause */
+        if (new.mode_counter < (INTER_SEQ_TICKS * 2 / 3)) {
+            new.leds = &leds_progress[progress_idx];
+        }
 
         if (new.mode_counter >= INTER_SEQ_TICKS) {
-            /* Start next round with one extra element */
             new.seq_len++;
             new.show_idx     = 0;
-            new.elem_active  = true;   /* Show first element immediately */
+            new.elem_active  = true;
             new.mode_counter = 0;
             new.game_mode    = MODE_SHOW_SEQUENCE;
+        }
+        break;
+    }
+
+    /* -----------------------------------------------------------
+     * MODE_NEW_RECORD_ANIM
+     *
+     * Special celebration for beating the per-difficulty best time.
+     * Plays the record animation for RECORD_ANIM_TICKS, then
+     * transitions to the normal win animation.
+     * ----------------------------------------------------------- */
+    case MODE_NEW_RECORD_ANIM:
+        AdvanceAnimation(&new);
+
+        if (new.mode_counter >= RECORD_ANIM_TICKS) {
+            new.game_mode    = MODE_WIN_ANIM;
+            new.mode_counter = 0;
+            InitAnimation(&new.anim_state, win_animation, win_animation_length);
+        }
+
+        if (any_just_pressed) {
+            new.leds           = &leds_off;
+            new.buzzer         = (buzzer_state_t){ .sound_on = false };
+            new.game_mode      = MODE_BOOT_ANIM;
+            new.mode_counter   = 0;
+            new.active_buttons = 0;
+            new.chord_timer    = 0;
+            InitAnimation(&new.anim_state, boot_animation, boot_animation_length);
         }
         break;
 
     /* -----------------------------------------------------------
      * MODE_WIN_ANIM
-     *
-     * Celebratory animation using diagonal LED pairs and ascending
-     * tones.  Loops indefinitely; any button press restarts game.
-     *
-     * Rubric: unique win animation, different from lose animation.
      * ----------------------------------------------------------- */
     case MODE_WIN_ANIM:
         AdvanceAnimation(&new);
 
         if (any_just_pressed) {
-            /* Restart: brief silence → new game */
-            new.leds         = &leds_off;
-            new.buzzer       = (buzzer_state_t){ .sound_on = false };
-            new.game_mode    = MODE_PRE_GAME;
-            new.mode_counter = 0;
+            new.leds           = &leds_off;
+            new.buzzer         = (buzzer_state_t){ .sound_on = false };
+            new.game_mode      = MODE_BOOT_ANIM;
+            new.mode_counter   = 0;
+            new.active_buttons = 0;
+            new.chord_timer    = 0;
+            InitAnimation(&new.anim_state, boot_animation, boot_animation_length);
         }
         break;
 
     /* -----------------------------------------------------------
      * MODE_LOSE_ANIM
-     *
-     * Somber animation using adjacent LED pairs and low descending
-     * tones.  Loops indefinitely; any button press restarts game.
-     *
-     * Rubric: unique lose animation, different from win animation.
      * ----------------------------------------------------------- */
     case MODE_LOSE_ANIM:
         AdvanceAnimation(&new);
 
         if (any_just_pressed) {
-            /* Restart: brief silence → new game */
-            new.leds         = &leds_off;
-            new.buzzer       = (buzzer_state_t){ .sound_on = false };
-            new.game_mode    = MODE_PRE_GAME;
-            new.mode_counter = 0;
+            new.leds           = &leds_off;
+            new.buzzer         = (buzzer_state_t){ .sound_on = false };
+            new.game_mode      = MODE_BOOT_ANIM;
+            new.mode_counter   = 0;
+            new.active_buttons = 0;
+            new.chord_timer    = 0;
+            InitAnimation(&new.anim_state, boot_animation, boot_animation_length);
         }
         break;
 
     /* -----------------------------------------------------------
-     * Safety net — should never be reached in normal operation
+     * MODE_SEQUENCER
+     *
+     * Free-play music mode.  Each button plays its tone and lights
+     * its LED while held.  Multiple buttons can be held at once
+     * (plays the tone of the lowest-index held button).
+     * Pressing all 4 buttons exits to boot animation (handled by
+     * the global reset check above).  Single press of any button
+     * just plays it.
+     * ----------------------------------------------------------- */
+    case MODE_SEQUENCER:
+        if (held_mask != 0) {
+            new.leds            = combo_led_lookup[held_mask & 0x0F];
+            new.buzzer.period   = GetElementTone(held_mask);
+            new.buzzer.sound_on = true;
+        }
+        break;
+
+    /* -----------------------------------------------------------
+     * Safety net
      * ----------------------------------------------------------- */
     default:
-        new.game_mode    = MODE_BOOT_ANIM;
-        new.mode_counter = 0;
+        new.game_mode      = MODE_BOOT_ANIM;
+        new.mode_counter   = 0;
+        new.active_buttons = 0;
+        new.chord_timer    = 0;
         InitAnimation(&new.anim_state, boot_animation, boot_animation_length);
         break;
     }
