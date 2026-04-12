@@ -29,16 +29,38 @@ extern const leds_message_t leds_on;
  * Used during sequence playback and player input.                   */
 extern const leds_message_t led_single[4];
 
-/* ---- Win animation frames: diagonal LED pairs ----
- * leds_pair_02 = LED 0 (Blue)  + LED 2 (Green)
- * leds_pair_13 = LED 1 (Red)   + LED 3 (Yellow)                    */
-extern const leds_message_t leds_pair_02;
-extern const leds_message_t leds_pair_13;
-
-/* ---- Lose animation frames: adjacent LED pairs ----
- * leds_pair_01 = LED 0 (Blue)  + LED 1 (Red)
- * leds_pair_23 = LED 2 (Green) + LED 3 (Yellow)                    */
+/* ---- All six pair combinations ---- */
 extern const leds_message_t leds_pair_01;
+extern const leds_message_t leds_pair_02;
+extern const leds_message_t leds_pair_03;
+extern const leds_message_t leds_pair_12;
+extern const leds_message_t leds_pair_13;
 extern const leds_message_t leds_pair_23;
+
+/* ---- All four triple combinations ---- */
+extern const leds_message_t leds_triple_012;
+extern const leds_message_t leds_triple_013;
+extern const leds_message_t leds_triple_023;
+extern const leds_message_t leds_triple_123;
+
+/* ---- Special color patterns (all 4 LEDs, same color) ---- */
+extern const leds_message_t leds_all_white;
+extern const leds_message_t leds_all_purple;
+extern const leds_message_t leds_all_cyan;
+extern const leds_message_t leds_all_orange;
+
+/* ---- Difficulty indicator patterns (all 4 LEDs, themed color) ----
+ *   [0] Easy   = green   (calming)
+ *   [1] Normal = blue    (standard)
+ *   [2] Hard   = orange  (warning)
+ *   [3] Expert = red     (danger)                                   */
+extern const leds_message_t leds_difficulty[4];
+
+/* ---- Round progress indicators (cumulative left-to-right fill) ----
+ *   [0] = LED 0 only
+ *   [1] = LED 0+1
+ *   [2] = LED 0+1+2
+ *   [3] = all four LEDs                                             */
+extern const leds_message_t leds_progress[4];
 
 #endif /* colors_include */
